@@ -83,6 +83,273 @@ static LogScope wl_log("wlserver");
 
 using namespace std::literals;
 
+#include <fstream>
+#include <unordered_map>
+#include <unordered_set>
+#include <string>
+#include <cstdlib>
+#include <vector>
+
+struct GameEnvState {
+	uint32_t counter;
+	int max_width;
+	int max_height;
+	size_t server_idx;
+	std::string appid;
+};
+
+std::unordered_map<uint32_t, GameEnvState> g_ActiveGames;
+uint32_t g_GameCounter = 0;
+uint32_t g_AppFocused = 0;
+uint32_t g_IntendedAppId = 0;
+
+int g_Server0_Width_Cur = 0;
+int g_Server0_Height_Cur = 0;
+int g_Server1_Width_Cur = 0;
+int g_Server1_Height_Cur = 0;
+
+int g_DisplayNativeWidth = 0;
+int g_DisplayNativeHeight = 0;
+
+void UpdateNativeDisplayEnv()
+{
+	std::string homeDir = std::getenv("HOME") ? std::getenv("HOME") : "";
+	if (homeDir.empty()) return;
+
+	std::string modesPath = homeDir + "/.config/gamescope/modes.cfg";
+	std::string envPath = homeDir + "/.config/gamescope/gamescope-display.env";
+
+	std::ifstream modesFile(modesPath);
+	if (modesFile.is_open()) {
+		std::string line;
+		if (std::getline(modesFile, line)) {
+			size_t colon = line.find(':');
+			if (colon != std::string::npos) {
+				size_t x_pos = line.find('x', colon);
+				size_t at_pos = line.find('@', x_pos);
+				if (x_pos != std::string::npos && at_pos != std::string::npos) {
+					std::string w_str = line.substr(colon + 1, x_pos - colon - 1);
+					std::string h_str = line.substr(x_pos + 1, at_pos - x_pos - 1);
+					g_DisplayNativeWidth = atoi(w_str.c_str());
+					g_DisplayNativeHeight = atoi(h_str.c_str());
+				}
+			}
+		}
+		modesFile.close();
+	}
+
+	if (g_DisplayNativeWidth == 0 || g_DisplayNativeHeight == 0) return;
+
+	std::vector<std::string> envLines;
+	std::ifstream envIn(envPath);
+	bool foundWidth = false;
+	bool foundHeight = false;
+
+	if (envIn.is_open()) {
+		std::string eLine;
+		while (std::getline(envIn, eLine)) {
+			if (eLine.find("DISPLAY_NATIVE_WIDTH_RES=") == 0) {
+				envLines.push_back("DISPLAY_NATIVE_WIDTH_RES=\"" + std::to_string(g_DisplayNativeWidth) + "\"");
+				foundWidth = true;
+			} else if (eLine.find("DISPLAY_NATIVE_HEIGHT_RES=") == 0) {
+				envLines.push_back("DISPLAY_NATIVE_HEIGHT_RES=\"" + std::to_string(g_DisplayNativeHeight) + "\"");
+				foundHeight = true;
+			} else {
+				envLines.push_back(eLine);
+			}
+		}
+		envIn.close();
+	}
+
+	if (!foundWidth) envLines.push_back("DISPLAY_NATIVE_WIDTH_RES=\"" + std::to_string(g_DisplayNativeWidth) + "\"");
+	if (!foundHeight) envLines.push_back("DISPLAY_NATIVE_HEIGHT_RES=\"" + std::to_string(g_DisplayNativeHeight) + "\"");
+
+	std::ofstream envOut(envPath, std::ios::trunc);
+	if (envOut.is_open()) {
+		for (const auto& l : envLines) {
+			envOut << l << "\n";
+		}
+		envOut.close();
+	}
+}
+
+void WriteGamescopeActiveEnv()
+{
+	std::string filePath = "/tmp/gamescope-active.env"; 
+	if (const char* homeDir = std::getenv("HOME")) 
+	{
+		filePath = std::string(homeDir) + "/.config/gamescope/gamescope-active.env";
+	}
+
+	std::ofstream envFile(filePath, std::ios::trunc);
+	if (envFile.is_open())
+	{
+		if (g_DisplayNativeWidth > 0 && g_DisplayNativeHeight > 0) {
+			envFile << "DISPLAY_NATIVE_WIDTH_RES=\"" << g_DisplayNativeWidth << "\"\n";
+			envFile << "DISPLAY_NATIVE_HEIGHT_RES=\"" << g_DisplayNativeHeight << "\"\n";
+		}
+
+		envFile << "APP_FOCUSED=\"" << (g_AppFocused == 0 ? "0" : std::to_string(g_AppFocused)) << "\"\n";
+		
+		envFile << "SERVER_0_WIDTH_CUR=\"" << g_Server0_Width_Cur << "\"\n";
+		envFile << "SERVER_0_HEIGHT_CUR=\"" << g_Server0_Height_Cur << "\"\n";
+		envFile << "SERVER_1_WIDTH_CUR=\"" << g_Server1_Width_Cur << "\"\n";
+		envFile << "SERVER_1_HEIGHT_CUR=\"" << g_Server1_Height_Cur << "\"\n";
+
+		for (const auto& [appid, state] : g_ActiveGames)
+		{
+			if (!state.appid.empty())
+			{
+				envFile << "GAME_" << state.counter << "=\"" << state.appid << "\"\n";
+				envFile << "GAME_" << state.counter << "_WIDTH_MAX=\"" << state.max_width << "\"\n";
+				envFile << "GAME_" << state.counter << "_HEIGHT_MAX=\"" << state.max_height << "\"\n";
+				envFile << "GAME_" << state.counter << "_SERVER=\"" << state.server_idx << "\"\n";
+			}
+		}
+		envFile.close();
+	}
+}
+
+extern "C" void wlserver_set_intended_appid(uint32_t appid)
+{
+	if (appid == 0) return; 
+	g_IntendedAppId = appid;
+}
+
+extern "C" void wlserver_sync_active_appids(const uint32_t* appids, size_t count)
+{
+	std::unordered_set<uint32_t> alive_appids;
+	bool changed = false;
+
+	for (size_t i = 0; i < count; ++i) {
+		if (appids[i] == 769 || appids[i] == 413091) continue;
+
+		alive_appids.insert(appids[i]);
+		
+		if (g_ActiveGames.find(appids[i]) == g_ActiveGames.end()) {
+			g_GameCounter++;
+			g_ActiveGames[appids[i]].counter = g_GameCounter;
+			g_ActiveGames[appids[i]].appid = std::to_string(appids[i]);
+			g_ActiveGames[appids[i]].max_width = 0;
+			g_ActiveGames[appids[i]].max_height = 0;
+			g_ActiveGames[appids[i]].server_idx = 0; 
+			changed = true;
+		}
+	}
+	
+	for (auto it = g_ActiveGames.begin(); it != g_ActiveGames.end(); ) {
+		if (alive_appids.find(it->first) == alive_appids.end()) {
+			it = g_ActiveGames.erase(it);
+			changed = true;
+		} else {
+			++it;
+		}
+	}
+	
+	if (changed) {
+		WriteGamescopeActiveEnv();
+	}
+}
+
+extern "C" void wlserver_update_sandbox_appid(uint32_t appid) { }
+extern "C" void wlserver_remove_sandbox_appid(uint32_t appid) { }
+
+extern "C" void wlserver_set_focused_appid(uint32_t appid, size_t server_idx)
+{
+	if (appid == 0) return;
+
+	// Detect if the newly focused AppID is different from the previously focused AppID
+	bool app_changed = (g_AppFocused != appid);
+	g_AppFocused = appid;
+
+	UpdateNativeDisplayEnv();
+
+	if (appid == 769 || appid == 413091) {
+		// When Steam or the Overlay are focused, re-size the games display server 
+		// using the values of the DISPLAY_NATIVE_*_RES variables.
+		if (app_changed && g_DisplayNativeWidth > 0 && g_DisplayNativeHeight > 0) {
+			if (!g_ActiveGames.empty()) {
+				for (const auto& [tracked_appid, state] : g_ActiveGames) {
+					if (state.server_idx == 1 && (g_DisplayNativeWidth != g_Server1_Width_Cur || g_DisplayNativeHeight != g_Server1_Height_Cur)) {
+						wlserver_lock();
+						uint32_t backup_intent = g_IntendedAppId;
+						g_IntendedAppId = 0;
+						wlserver_set_xwayland_server_mode(1, g_DisplayNativeWidth, g_DisplayNativeHeight, g_nOutputRefresh);
+						g_IntendedAppId = backup_intent;
+						wlserver_unlock();
+					} else if (state.server_idx == 0 && (g_DisplayNativeWidth != g_Server0_Width_Cur || g_DisplayNativeHeight != g_Server0_Height_Cur)) {
+						wlserver_lock();
+						uint32_t backup_intent = g_IntendedAppId;
+						g_IntendedAppId = 0;
+						wlserver_set_xwayland_server_mode(0, g_DisplayNativeWidth, g_DisplayNativeHeight, g_nOutputRefresh);
+						g_IntendedAppId = backup_intent;
+						wlserver_unlock();
+					}
+				}
+			} else {
+				if (server_idx == 1 && (g_DisplayNativeWidth != g_Server1_Width_Cur || g_DisplayNativeHeight != g_Server1_Height_Cur)) {
+					wlserver_lock();
+					uint32_t backup_intent = g_IntendedAppId;
+					g_IntendedAppId = 0;
+					wlserver_set_xwayland_server_mode(1, g_DisplayNativeWidth, g_DisplayNativeHeight, g_nOutputRefresh);
+					g_IntendedAppId = backup_intent;
+					wlserver_unlock();
+				} else if (server_idx == 0 && (g_DisplayNativeWidth != g_Server0_Width_Cur || g_DisplayNativeHeight != g_Server0_Height_Cur)) {
+					wlserver_lock();
+					uint32_t backup_intent = g_IntendedAppId;
+					g_IntendedAppId = 0;
+					wlserver_set_xwayland_server_mode(0, g_DisplayNativeWidth, g_DisplayNativeHeight, g_nOutputRefresh);
+					g_IntendedAppId = backup_intent;
+					wlserver_unlock();
+				}
+			}
+		}
+	}
+	else {
+		// When the game is re-focused, re-size the games display server 
+		// using the values of the currently focused games GAME_*_MAX variables.
+		if (g_ActiveGames.find(appid) == g_ActiveGames.end()) {
+			g_GameCounter++;
+			g_ActiveGames[appid].counter = g_GameCounter;
+			g_ActiveGames[appid].appid = std::to_string(appid);
+			g_ActiveGames[appid].max_width = 0;
+			g_ActiveGames[appid].max_height = 0;
+		}
+		
+		g_ActiveGames[appid].server_idx = server_idx;
+		
+		if (g_ActiveGames[appid].max_width == 0 && g_nNestedWidth > 0) {
+			g_ActiveGames[appid].max_width = g_nNestedWidth;
+			g_ActiveGames[appid].max_height = g_nNestedHeight;
+		}
+
+		if (app_changed) {
+			int max_w = g_ActiveGames[appid].max_width;
+			int max_h = g_ActiveGames[appid].max_height;
+			
+			if (max_w > 0 && max_h > 0) {
+				if (server_idx == 1 && (max_w != g_Server1_Width_Cur || max_h != g_Server1_Height_Cur)) {
+					wlserver_lock();
+					uint32_t backup_intent = g_IntendedAppId;
+					g_IntendedAppId = 0;
+					wlserver_set_xwayland_server_mode(1, max_w, max_h, g_nOutputRefresh);
+					g_IntendedAppId = backup_intent;
+					wlserver_unlock();
+				} else if (server_idx == 0 && (max_w != g_Server0_Width_Cur || max_h != g_Server0_Height_Cur)) {
+					wlserver_lock();
+					uint32_t backup_intent = g_IntendedAppId;
+					g_IntendedAppId = 0;
+					wlserver_set_xwayland_server_mode(0, max_w, max_h, g_nOutputRefresh);
+					g_IntendedAppId = backup_intent;
+					wlserver_unlock();
+				}
+			}
+		}
+	}
+
+	WriteGamescopeActiveEnv();
+}
+
 extern gamescope::ConVar<bool> cv_drm_debug_disable_explicit_sync;
 
 //#define GAMESCOPE_SWAPCHAIN_DEBUG
@@ -2547,26 +2814,40 @@ void wlserver_oncursorevent()
 	}
 }
 
-static std::pair<int, int> wlserver_get_cursor_bounds()
+struct CursorBounds {
+	double min_x, min_y, max_x, max_y;
+};
+
+static CursorBounds wlserver_get_cursor_bounds()
 {
 	auto [nWidth, nHeight] = wlserver_get_surface_extent( wlserver.mouse_focus_surface );
+	
+	double min_x = 0.0;
+	double min_y = 0.0;
+	double max_x = (double)nWidth;
+	double max_y = (double)nHeight;
+
 	for ( auto iter : wlserver.current_dropdown_surfaces )
 	{
 		auto [nDropdownX, nDropdownY] = iter.second;
 		auto [nDropdownWidth, nDropdownHeight] = wlserver_get_surface_extent( iter.first );
 
-		nWidth = std::max( nWidth, nDropdownX + nDropdownWidth );
-		nHeight = std::max( nHeight, nDropdownY + nDropdownHeight );
+		// Asymmetrically expand boundaries by tracking the minimum 
+		// and maximum coordinates of the active dropdown overlays.
+		min_x = std::min( min_x, (double)nDropdownX );
+		min_y = std::min( min_y, (double)nDropdownY );
+		max_x = std::max( max_x, (double)(nDropdownX + nDropdownWidth) );
+		max_y = std::max( max_y, (double)(nDropdownY + nDropdownHeight) );
 	}
 
-	return std::make_pair( nWidth, nHeight );
+	return { min_x, min_y, max_x, max_y };
 }
 
 static void wlserver_clampcursor()
 {
-	auto [nWidth, nHeight] = wlserver_get_cursor_bounds();
-	wlserver.mouse_surface_cursorx = std::clamp( wlserver.mouse_surface_cursorx, 0.0, double( std::max( nWidth - 1, 0 ) ) );
-	wlserver.mouse_surface_cursory = std::clamp( wlserver.mouse_surface_cursory, 0.0, double( std::max( nHeight - 1, 0 ) ) );
+	auto bounds = wlserver_get_cursor_bounds();
+	wlserver.mouse_surface_cursorx = std::clamp( wlserver.mouse_surface_cursorx, bounds.min_x, std::max( bounds.max_x - 1.0, bounds.min_x ) );
+	wlserver.mouse_surface_cursory = std::clamp( wlserver.mouse_surface_cursory, bounds.min_y, std::max( bounds.max_y - 1.0, bounds.min_y ) );
 }
 
 void wlserver_mousefocus( struct wlr_surface *wlrsurface, int x /* = 0 */, int y /* = 0 */ )
@@ -2965,7 +3246,7 @@ static void apply_touchscreen_orientation(GamescopePanelOrientation orientation,
 	*y = ty;
 }
 
-void wlserver_touchmotion( double x, double y, int touch_id, uint32_t time, bool bAlwaysWarpCursor, gamescope::IBackendConnector* connector )
+void  wlserver_touchmotion( double x, double y, int touch_id, uint32_t time, bool bAlwaysWarpCursor, gamescope::IBackendConnector* connector )
 {
 	assert( wlserver_is_lock_held() );
 
@@ -2986,9 +3267,9 @@ void wlserver_touchmotion( double x, double y, int touch_id, uint32_t time, bool
 		tx *= focusedWindowScaleX;
 		ty *= focusedWindowScaleY;
 
-		auto [nWidth, nHeight] = wlserver_get_cursor_bounds();
-		tx = clamp( tx, 0.0, nWidth - 0.1 );
-		ty = clamp( ty, 0.0, nHeight - 0.1 );
+		auto bounds = wlserver_get_cursor_bounds();
+		tx = clamp( tx, bounds.min_x, bounds.max_x - 0.1 );
+		ty = clamp( ty, bounds.min_y, bounds.max_y - 0.1 );
 
 		double trackpad_dx, trackpad_dy;
 
@@ -3297,6 +3578,37 @@ void wlserver_set_xwayland_server_mode( size_t idx, int w, int h, int nRefreshmH
 {
 	assert( wlserver_is_lock_held() );
 
+	UpdateNativeDisplayEnv(); // Keep native dimensions up to date on modeset
+
+	if (idx == 0) {
+		g_Server0_Width_Cur = w;
+		g_Server0_Height_Cur = h;
+	} else if (idx == 1) {
+		g_Server1_Width_Cur = w;
+		g_Server1_Height_Cur = h;
+	}
+
+	if (g_IntendedAppId != 0 && g_IntendedAppId != 769 && g_IntendedAppId != 413091) {
+		if (g_ActiveGames.find(g_IntendedAppId) == g_ActiveGames.end()) {
+			g_GameCounter++;
+			g_ActiveGames[g_IntendedAppId].counter = g_GameCounter;
+			g_ActiveGames[g_IntendedAppId].appid = std::to_string(g_IntendedAppId);
+			g_ActiveGames[g_IntendedAppId].max_width = 0;
+			g_ActiveGames[g_IntendedAppId].max_height = 0;
+		}
+		g_ActiveGames[g_IntendedAppId].server_idx = idx;
+
+		if (g_ActiveGames[g_IntendedAppId].max_width == 0 && w > 0) {
+			g_ActiveGames[g_IntendedAppId].max_width = w;
+			g_ActiveGames[g_IntendedAppId].max_height = h;
+		}
+	}
+
+	g_nNestedWidth = w;
+	g_nNestedHeight = h;
+
+	WriteGamescopeActiveEnv();
+
 	gamescope_xwayland_server_t *server = wlserver_get_xwayland_server( idx );
 	if ( !server )
 		return;
@@ -3311,6 +3623,8 @@ void wlserver_set_xwayland_server_mode( size_t idx, int w, int h, int nRefreshmH
 	}
 
 	wl_log.infof("Updating mode for xwayland server #%zu: %dx%d@%d", idx, w, h, gamescope::ConvertmHzToHz( nRefreshmHz ) );
+
+	GetBackend()->DirtyState(true, true);
 }
 
 // Definitely not very efficient if we end up with
