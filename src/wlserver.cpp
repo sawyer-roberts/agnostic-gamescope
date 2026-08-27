@@ -264,47 +264,6 @@ extern "C" void wlserver_set_focused_appid(uint32_t appid, size_t server_idx)
 
 	UpdateNativeDisplayEnv();
 
-	if (appid == 769 || appid == 413091) {
-		// When Steam or the Overlay are focused, re-size the games display server 
-		// using the values of the DISPLAY_NATIVE_*_RES variables.
-		if (app_changed && g_DisplayNativeWidth > 0 && g_DisplayNativeHeight > 0) {
-			if (!g_ActiveGames.empty()) {
-				for (const auto& [tracked_appid, state] : g_ActiveGames) {
-					if (state.server_idx == 1 && (g_DisplayNativeWidth != g_Server1_Width_Cur || g_DisplayNativeHeight != g_Server1_Height_Cur)) {
-						wlserver_lock();
-						uint32_t backup_intent = g_IntendedAppId;
-						g_IntendedAppId = 0;
-						wlserver_set_xwayland_server_mode(1, g_DisplayNativeWidth, g_DisplayNativeHeight, g_nOutputRefresh);
-						g_IntendedAppId = backup_intent;
-						wlserver_unlock();
-					} else if (state.server_idx == 0 && (g_DisplayNativeWidth != g_Server0_Width_Cur || g_DisplayNativeHeight != g_Server0_Height_Cur)) {
-						wlserver_lock();
-						uint32_t backup_intent = g_IntendedAppId;
-						g_IntendedAppId = 0;
-						wlserver_set_xwayland_server_mode(0, g_DisplayNativeWidth, g_DisplayNativeHeight, g_nOutputRefresh);
-						g_IntendedAppId = backup_intent;
-						wlserver_unlock();
-					}
-				}
-			} else {
-				if (server_idx == 1 && (g_DisplayNativeWidth != g_Server1_Width_Cur || g_DisplayNativeHeight != g_Server1_Height_Cur)) {
-					wlserver_lock();
-					uint32_t backup_intent = g_IntendedAppId;
-					g_IntendedAppId = 0;
-					wlserver_set_xwayland_server_mode(1, g_DisplayNativeWidth, g_DisplayNativeHeight, g_nOutputRefresh);
-					g_IntendedAppId = backup_intent;
-					wlserver_unlock();
-				} else if (server_idx == 0 && (g_DisplayNativeWidth != g_Server0_Width_Cur || g_DisplayNativeHeight != g_Server0_Height_Cur)) {
-					wlserver_lock();
-					uint32_t backup_intent = g_IntendedAppId;
-					g_IntendedAppId = 0;
-					wlserver_set_xwayland_server_mode(0, g_DisplayNativeWidth, g_DisplayNativeHeight, g_nOutputRefresh);
-					g_IntendedAppId = backup_intent;
-					wlserver_unlock();
-				}
-			}
-		}
-	}
 	else {
 		// When the game is re-focused, re-size the games display server 
 		// using the values of the currently focused games GAME_*_MAX variables.
@@ -2818,6 +2777,10 @@ struct CursorBounds {
 
 static CursorBounds wlserver_get_cursor_bounds()
 {
+	if (g_AppFocused == 769 || g_AppFocused == 413091) {
+		return { 0.0, 0.0, (double)g_DisplayNativeWidth, (double)g_DisplayNativeHeight };
+	}
+
 	auto [nWidth, nHeight] = wlserver_get_surface_extent( wlserver.mouse_focus_surface );
 	
 	double min_x = 0.0;
@@ -2860,17 +2823,17 @@ void wlserver_mousefocus( struct wlr_surface *wlrsurface, int x /* = 0 */, int y
 	{
 		wlserver.mouse_focus_surface = wlrsurface;
 
-		auto [nWidth, nHeight] = wlserver_get_surface_extent( wlrsurface );
+		auto bounds = wlserver_get_cursor_bounds();
 
-		if ( x < nWidth && y < nHeight )
+		if ( x >= bounds.min_x && x < bounds.max_x && y >= bounds.min_y && y < bounds.max_y )
 		{
 			wlserver.mouse_surface_cursorx = x;
 			wlserver.mouse_surface_cursory = y;
 		}
 		else
 		{
-			wlserver.mouse_surface_cursorx = nWidth / 2.0;
-			wlserver.mouse_surface_cursory = nHeight / 2.0;
+			wlserver.mouse_surface_cursorx = bounds.min_x + (bounds.max_x - bounds.min_x) / 2.0;
+			wlserver.mouse_surface_cursory = bounds.min_y + (bounds.max_y - bounds.min_y) / 2.0;
 		}
 	}
 

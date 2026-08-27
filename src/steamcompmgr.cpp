@@ -1970,12 +1970,15 @@ void MouseCursor::paint(steamcompmgr_win_t *window, steamcompmgr_win_t *fit, str
 	float scaledX, scaledY;
 	float currentScaleRatio_x = 1.0;
 	float currentScaleRatio_y = 1.0;
-	int cursorOffsetX, cursorOffsetY;
+	int cursorOffsetX = 0, cursorOffsetY = 0;
 
-	calc_scale_factor(currentScaleRatio_x, currentScaleRatio_y, sourceWidth, sourceHeight);
+	if (sourceWidth != (int32_t)currentOutputWidth || sourceHeight != (int32_t)currentOutputHeight || globalScaleRatio != 1.0f)
+	{
+		calc_scale_factor(currentScaleRatio_x, currentScaleRatio_y, sourceWidth, sourceHeight);
 
-	cursorOffsetX = (currentOutputWidth - sourceWidth * currentScaleRatio_x) / 2.0f;
-	cursorOffsetY = (currentOutputHeight - sourceHeight * currentScaleRatio_y) / 2.0f;
+		cursorOffsetX = (currentOutputWidth - sourceWidth * currentScaleRatio_x) / 2.0f;
+		cursorOffsetY = (currentOutputHeight - sourceHeight * currentScaleRatio_y) / 2.0f;
+	}
 
 	// Actual point on scaled screen where the cursor hotspot should be.
 	// Compositing ignores the focused window's X11 origin, so the cursor
