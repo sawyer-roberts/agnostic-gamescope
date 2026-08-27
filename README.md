@@ -15,6 +15,8 @@ It runs on Mesa + AMD or Intel, and could be made to run on other Mesa/DRM drive
 
 If running RadeonSI clients with older cards (GFX8 and below), currently have to set `R600_DEBUG=nodcc`, or corruption will be observed until the stack picks up DRM modifiers support.
 
+IMPORTANT: Once the AUR allows registering accounts, Agnostic Gamescope will be uploaded to it. In the meantime, you will have to compile it manually.
+
 ## Building
 
 Dependencies (**Arch/Arch-based**):
