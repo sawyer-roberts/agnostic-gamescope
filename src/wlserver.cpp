@@ -264,7 +264,7 @@ extern "C" void wlserver_set_focused_appid(uint32_t appid, size_t server_idx)
 
 	UpdateNativeDisplayEnv();
 
-	else {
+	if (appid != 769 && appid != 413091) {
 		// When the game is re-focused, re-size the games display server 
 		// using the values of the currently focused games GAME_*_MAX variables.
 		if (g_ActiveGames.find(appid) == g_ActiveGames.end()) {
