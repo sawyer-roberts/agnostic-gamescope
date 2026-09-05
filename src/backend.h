@@ -119,6 +119,10 @@ namespace gamescope
         // but don't want to expose HDR there as it is not good.
         bool bExposeHDRSupport = false;
         bool bAlwaysPatchEdid = false;
+        // Only drive a panel in HDR while an HDR app is running.
+        bool bContentDrivenHDR = false;
+        // Panel ignores hardware backlight control in PQ, follow it in software.
+        bool bSoftwareBacklight = false;
 
         // The output encoding to use for HDR output.
         // For typical HDR10 displays, this will be PQ.
@@ -400,8 +404,6 @@ namespace gamescope
 
         virtual bool NewlyInitted() = 0;
 
-        virtual bool ShouldFitWindows() = 0;
-
         virtual void OnEndFrame() = 0;
 
         static IBackend *Get();
@@ -438,8 +440,6 @@ namespace gamescope
         virtual void ForwardFramebuffer( std::shared_ptr<IBackendPlane> &pPlane, IBackendFb *pFramebuffer, const void *pData ) override {}
 
         virtual bool NewlyInitted() override { return false; }
-
-        virtual bool ShouldFitWindows() override { return true; }
 
         virtual void OnEndFrame() override {}
     };

@@ -106,6 +106,42 @@ namespace gamescope::Process
         return nPids;
     }
 
+    bool IsProcessRunning( const char *pszComm )
+    {
+        DIR *pProcDir = opendir( "/proc" );
+        if ( !pProcDir )
+            return false;
+        defer( closedir( pProcDir ) );
+
+        struct dirent *pEntry;
+        while ( ( pEntry = readdir( pProcDir ) ) )
+        {
+            if ( pEntry->d_type != DT_DIR )
+                continue;
+
+            if ( !IsDigit( pEntry->d_name[0] ) )
+                continue;
+
+            char szPath[ PATH_MAX ];
+            snprintf( szPath, sizeof( szPath ), "/proc/%s/comm", pEntry->d_name );
+
+            FILE *pCommFile = fopen( szPath, "r" );
+            if ( !pCommFile )
+                continue;
+            defer( fclose( pCommFile ) );
+
+            char szComm[ 32 ] = {};
+            if ( !fgets( szComm, sizeof( szComm ), pCommFile ) )
+                continue;
+            szComm[ strcspn( szComm, "\n" ) ] = '\0';
+
+            if ( !strcmp( szComm, pszComm ) )
+                return true;
+        }
+
+        return false;
+    }
+
     void KillProcessTree( std::vector<pid_t> nPids, int nSignal )
     {
         for ( pid_t nPid : nPids )
@@ -238,6 +274,12 @@ namespace gamescope::Process
         RestoreFdLimit();
         RestoreNice();
         RestoreRealtime();
+
+#if defined(__linux__)
+        // We don't want to leak caps to children since some programs, such as bwrap, refuse to start
+        // when they have unexpected capabilities.
+        prctl( PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0 );
+#endif
     }
 
     bool CloseFd( int nFd )
