@@ -2916,33 +2916,6 @@ static CursorBounds wlserver_get_cursor_bounds()
 
 	return { min_x, min_y, max_x, max_y };
 }
-{
-	if (g_AppFocused == 769 || g_AppFocused == 413091) {
-		return { 0.0, 0.0, (double)g_DisplayNativeWidth, (double)g_DisplayNativeHeight };
-	}
-
-	auto [nWidth, nHeight] = wlserver_get_surface_extent( wlserver.mouse_focus_surface );
-	
-	double min_x = 0.0;
-	double min_y = 0.0;
-	double max_x = (double)nWidth;
-	double max_y = (double)nHeight;
-
-	for ( auto iter : wlserver.current_dropdown_surfaces )
-	{
-		auto [nDropdownX, nDropdownY] = iter.second;
-		auto [nDropdownWidth, nDropdownHeight] = wlserver_get_surface_extent( iter.first );
-
-		// Asymmetrically expand boundaries by tracking the minimum 
-		// and maximum coordinates of the active dropdown overlays.
-		min_x = std::min( min_x, (double)nDropdownX );
-		min_y = std::min( min_y, (double)nDropdownY );
-		max_x = std::max( max_x, (double)(nDropdownX + nDropdownWidth) );
-		max_y = std::max( max_y, (double)(nDropdownY + nDropdownHeight) );
-	}
-
-	return { min_x, min_y, max_x, max_y };
-}
 
 static void wlserver_clampcursor()
 {
