@@ -942,6 +942,12 @@ unsigned int 	g_FadeOutDuration = 0;
 
 extern float g_flMaxWindowScale;
 
+extern "C" void wlserver_set_intended_appid( uint32_t appid );
+extern "C" void wlserver_update_sandbox_appid( uint32_t appid );
+extern "C" void wlserver_remove_sandbox_appid( uint32_t appid );
+extern "C" void wlserver_set_focused_appid( uint32_t appid, size_t server_idx );
+extern "C" void wlserver_sync_active_appids( const uint32_t* appids, size_t count );
+
 bool			synchronize;
 
 std::mutex g_SteamCompMgrXWaylandServerMutex;
@@ -1588,18 +1594,34 @@ MouseCursor::MouseCursor(xwayland_ctx_t *ctx)
 void MouseCursor::UpdatePosition()
 {
 	wlserver_lock();
-	struct wlr_pointer_constraint_v1 *pConstraint = wlserver.GetCursorConstraint();
-	m_bConstrained = !!pConstraint;
-	if ( pConstraint && pConstraint->current.cursor_hint.enabled )
+	
+	uint32_t currentAppID = 0;
+	if (m_ctx && m_ctx->focus.inputFocusWindow) {
+		currentAppID = m_ctx->focus.inputFocusWindow->appID;
+	}
+
+	if ( currentAppID == 769 || currentAppID == 413091 )
 	{
-		m_x = pConstraint->current.cursor_hint.x;
-		m_y = pConstraint->current.cursor_hint.y;
+		struct wlr_pointer_constraint_v1 *pConstraint = wlserver.GetCursorConstraint();
+		m_bConstrained = !!pConstraint;
+		if ( pConstraint && pConstraint->current.cursor_hint.enabled )
+		{
+			m_x = pConstraint->current.cursor_hint.x;
+			m_y = pConstraint->current.cursor_hint.y;
+		}
+		else
+		{
+			m_x = wlserver.mouse_surface_cursorx;
+			m_y = wlserver.mouse_surface_cursory;
+		}
 	}
 	else
 	{
+		m_bConstrained = false;
 		m_x = wlserver.mouse_surface_cursorx;
 		m_y = wlserver.mouse_surface_cursory;
 	}
+	
 	wlserver_unlock();
 }
 
@@ -1948,12 +1970,15 @@ void MouseCursor::paint(steamcompmgr_win_t *window, steamcompmgr_win_t *fit, str
 	float scaledX, scaledY;
 	float currentScaleRatio_x = 1.0;
 	float currentScaleRatio_y = 1.0;
-	int cursorOffsetX, cursorOffsetY;
+	int cursorOffsetX = 0, cursorOffsetY = 0;
 
-	calc_scale_factor(currentScaleRatio_x, currentScaleRatio_y, sourceWidth, sourceHeight);
-
-	cursorOffsetX = (currentOutputWidth - sourceWidth * currentScaleRatio_x) / 2.0f;
-	cursorOffsetY = (currentOutputHeight - sourceHeight * currentScaleRatio_y) / 2.0f;
+	if (sourceWidth != (int32_t)currentOutputWidth || sourceHeight != (int32_t)currentOutputHeight || globalScaleRatio != 1.0f)
+	{
+		calc_scale_factor(currentScaleRatio_x, currentScaleRatio_y, sourceWidth, sourceHeight);
+		
+		cursorOffsetX = (currentOutputWidth - sourceWidth * currentScaleRatio_x) / 2.0f;
+		cursorOffsetY = (currentOutputHeight - sourceHeight * currentScaleRatio_y) / 2.0f;
+	}
 
 	// Actual point on scaled screen where the cursor hotspot should be.
 	// Compositing ignores the focused window's X11 origin, so the cursor
@@ -4442,8 +4467,10 @@ determine_and_apply_focus( global_focus_t *pFocus )
 
 	std::vector< unsigned long > focusable_appids;
 	std::vector< unsigned long > focusable_windows;
+	std::vector< uint32_t > sync_appids;
 
 	// Apply focus to the XWayland contexts.
+
 	{
 		gamescope_xwayland_server_t *server = NULL;
 		for (size_t i = 0; (server = wlserver_get_xwayland_server(i)); i++)
@@ -4490,6 +4517,7 @@ determine_and_apply_focus( global_focus_t *pFocus )
 			if ( j == focusable_appids.size() )
 			{
 				focusable_appids.push_back( unAppID );
+				sync_appids.push_back( (uint32_t)unAppID );
 			}
 		}
 
@@ -4501,6 +4529,9 @@ determine_and_apply_focus( global_focus_t *pFocus )
 
 	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeFocusableAppsAtom, XA_CARDINAL, 32, PropModeReplace,
 					 (unsigned char *)focusable_appids.data(), focusable_appids.size() );
+
+	// Sync the infallible list of living games directly to the tracker
+	wlserver_sync_active_appids( sync_appids.data(), sync_appids.size() );
 
 	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeFocusableWindowsAtom, XA_CARDINAL, 32, PropModeReplace,
 					 (unsigned char *)focusable_windows.data(), focusable_windows.size() );
@@ -4546,7 +4577,7 @@ determine_and_apply_focus( global_focus_t *pFocus )
 	}
 
 	// Pick inputFocusWindow
-	if ( gamescope::VirtualConnectorIsSingleOutput() &&
+	if ( (gamescope::VirtualConnectorIsSingleOutput() || gamescope::VirtualConnectorKeyIsSteam( pFocus->ulVirtualFocusKey )) &&
 	     pFocus->overlayWindow && pFocus->overlayWindow->inputFocusMode )
 	{
 		pFocus->inputFocusWindow = pFocus->overlayWindow;
@@ -4796,6 +4827,12 @@ determine_and_apply_focus( global_focus_t *pFocus )
 
 	if ( pFocus == GetCurrentFocus() )
 	{
+		// Only update backend tracking if this is the active, global physical focus
+		if (focusedAppId != 0) {
+			size_t server_idx = pFocus->inputFocusWindow->type == steamcompmgr_win_type_t::XWAYLAND ? pFocus->inputFocusWindow->xwayland().ctx->xwayland_server->get_index() : 0;
+			wlserver_set_focused_appid(focusedAppId, server_idx);
+		}
+
 		if ( steamMode )
 		{
 			XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeFocusedAppAtom, XA_CARDINAL, 32, PropModeReplace,
@@ -5158,6 +5195,11 @@ map_win(xwayland_ctx_t* ctx, Window id, unsigned long sequence)
 	if ( w->isExternalOverlay )
 		w->appID = 0;
 
+	if ( w->appID != 0 && !w->isOverlay && !w->isExternalOverlay && w->type == steamcompmgr_win_type_t::XWAYLAND )
+	{
+		wlserver_update_sandbox_appid( w->appID );
+	}
+
 	w->oulTargetVROverlay = get_u64_prop(ctx, w->xwayland().id, ctx->atoms.steamGamescopeVROverlayTarget);
 	if ( w->oulTargetVROverlay )
 	{
@@ -5380,6 +5422,11 @@ add_win(xwayland_ctx_t *ctx, Window id, Window prev, unsigned long sequence)
 	if ( new_win->isExternalOverlay )
 		new_win->appID = 0;
 
+	// Use Process ID to unify main windows and tooltips
+	if ( new_win->appID == 0 && new_win->pid > 0 ) {
+		new_win->appID = new_win->pid;
+	}
+
 	std::string pid_name = get_name_from_pid( new_win->pid );
 	new_win->pid_name = pid_name;
 	if ( pid_name == "steam" )
@@ -5558,7 +5605,13 @@ finish_destroy_win(xwayland_ctx_t *ctx, Window id, bool gone)
 		if (w->xwayland().id == id)
 		{
 			if (gone)
+			{
+				if (w->appID != 0 && !w->isOverlay && !w->isExternalOverlay)
+				{
+					wlserver_remove_sandbox_appid(w->appID);
+				}
 				finish_unmap_win (ctx, w);
+			}
 			
 			{
 				std::unique_lock lock( ctx->list_mutex );
@@ -6248,6 +6301,11 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 	if (ev->atom == ctx->atoms.gamescopeCtrlAppIDAtom )
 	{
 		get_prop( ctx, ctx->root, ctx->atoms.gamescopeCtrlAppIDAtom, vecFocuscontrolAppIDs );
+		
+		if (!vecFocuscontrolAppIDs.empty()) {
+			wlserver_set_intended_appid(vecFocuscontrolAppIDs.back());
+		}
+
 		MakeFocusDirty();
 	}
 	if (ev->atom == ctx->atoms.gamescopeCtrlWindowAtom )
@@ -6287,15 +6345,20 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 		if (w)
 		{
 			uint32_t appID = get_prop(ctx, w->xwayland().id, ctx->atoms.gameAtom, 0);
-			w->steamAppID = appID;
 
 			if ( w->appID != 0 && appID != 0 && w->appID != appID )
 			{
 				xwm_log.errorf( "appid clash was %u now %u", w->appID, appID );
+				wlserver_remove_sandbox_appid(w->appID);
 			}
 			w->appID = appID;
 			if ( w->isExternalOverlay )
 				w->appID = 0;
+
+			if ( w->appID != 0 && !w->isOverlay && !w->isExternalOverlay && w->type == steamcompmgr_win_type_t::XWAYLAND )
+			{
+				wlserver_update_sandbox_appid( w->appID );
+			}
 
 			MakeFocusDirty();
 		}
@@ -9273,7 +9336,13 @@ steamcompmgr_main(int argc, char **argv)
 
 				const bool bExcludedAppId = uAppId && gamescope::Algorithm::Contains( s_uRelativeMouseFilteredAppids, uAppId );
 
-				const bool bRelativeMouseMode = bImageEmpty && bHasPointerConstraint && !bExcludedAppId;
+				bool bRelativeMouseMode = bImageEmpty && bHasPointerConstraint && !bExcludedAppId;
+
+				// Force relative mouse mode off for everything except Steam
+				if ( uAppId != 769 && uAppId != 413091 )
+				{
+					bRelativeMouseMode = false;
+				}
 
 				pPaintFocus->GetNestedHints()->SetRelativeMouseMode( bRelativeMouseMode );
 			}
